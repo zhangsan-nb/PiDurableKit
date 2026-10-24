@@ -253,6 +253,13 @@ struct FoundationModelsTests {
             NSMultipleUnderlyingErrorsKey: [NSError(domain: "FoundationModels.LanguageModelError", code: -1, userInfo: [NSMultipleUnderlyingErrorsKey: [generative]])],
         ])
         #expect(FoundationModelsResponder.message(for: cancelled) == "The system cancelled the request (service unavailable): LanguageModelError -1, GenerativeError 2010000")
+        // Private Cloud Compute's overflow.
+        let over = NSError(domain: "FoundationModels.LanguageModelError", code: -1, userInfo: [
+            NSMultipleUnderlyingErrorsKey: [NSError(domain: "FoundationModels.LanguageModelError", code: -1, userInfo: [
+                NSMultipleUnderlyingErrorsKey: [NSError(domain: FoundationModelsResponder.generativeErrorDomain, code: 1_020_000)],
+            ])],
+        ])
+        #expect(FoundationModelsResponder.message(for: over) == "The input exceeds the context window: LanguageModelError -1, GenerativeError 1020000")
         let unknown = NSError(domain: "FoundationModels.LanguageModelError", code: -1)
         #expect(FoundationModelsResponder.message(for: unknown) == "The model could not answer: LanguageModelError -1")
         let quota = FoundationModelsResponder.message(for: PrivateCloudComputeLanguageModel.Error.quotaLimitReached(.init(

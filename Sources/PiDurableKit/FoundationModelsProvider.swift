@@ -477,10 +477,19 @@ struct FoundationModelsResponder: Sendable {
         if case .assetsUnavailable? = error as? SystemLanguageModel.Error {
             return "Apple's on-device model assets are unavailable (service unavailable): \(detail)"
         }
+        // Private Cloud Compute turns away a request longer than its window without the public case, and can't count
+        // tokens beforehand: as `GenerativeError` 1020000 ("The max context length was reached with input token count:
+        // 32837, context length: 32768", its service logs; iOS 27). An overflow, so pi-durable compacts and retries
+        // rather than ending the reply. (In the iOS Simulator, every failure on the Mac's side arrives as
+        // `ModelManagerError` 1001, an overflow and a rate limit alike, so that one can't be told apart.)
+        let errors = underlying(error)
+        if errors.contains(where: { $0.domain == generativeErrorDomain && $0.code == 1_020_000 }) {
+            return "The input exceeds the context window: \(detail)"
+        }
         // Failures without a public case arrive as an `NSError` over Apple's own `GenerativeError`, whose code is its
         // category in millions (undocumented; read from the framework): 2 a request the system cancelled, 3 a
         // network failure.
-        if let generative = underlying(error).last(where: { $0.domain == generativeErrorDomain }) {
+        if let generative = errors.last(where: { $0.domain == generativeErrorDomain }) {
             switch generative.code / 1_000_000 {
             case 2: return "The system cancelled the request (service unavailable): \(detail)"
             case 3: return "Network error: \(detail)"
