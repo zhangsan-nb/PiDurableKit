@@ -466,6 +466,7 @@ struct FoundationModelsResponder: Sendable {
             default: return nil
             }
         }
+        if unparsable(error) { return Retry() }
         // Apple's own `GenerativeError` categories: 2 a request the system cancelled, 3 a network failure.
         if let generative = underlying(error).last(where: { $0.domain == generativeErrorDomain }), [2, 3].contains(generative.code / 1_000_000) {
             return Retry()
@@ -538,6 +539,11 @@ struct FoundationModelsResponder: Sendable {
             default: break
             }
         }
+        // Output Private Cloud Compute couldn't read back, now and then, for a request that answers the next time
+        // (seen summarizing a conversation with tool calls in it): transient, so retried, in words pi-ai retries.
+        if unparsable(error) {
+            return "The model's answer could not be read (provider returned an error): \(detail) (\(codes(error)))"
+        }
         return "The model could not answer: \(detail)"
     }
 
@@ -565,12 +571,25 @@ struct FoundationModelsResponder: Sendable {
         let words = (error as? LocalizedError)?.errorDescription ?? String(reflecting: error)
         // (An `NSError`'s debug description is its dump, "Error Domain=… UserInfo={…}".)
         if !words.isEmpty, !words.hasPrefix("Error Domain=") { return words }
+        return codes(error)
+    }
+
+    /// An error's domain and code, and those of the errors under it: "LanguageModelError -1, GenerativeError 2010000".
+    static func codes(_ error: Error) -> String {
         var codes: [String] = []
         for error in [error as NSError] + underlying(error) {
             let code = "\(error.domain.split(separator: ".").last ?? "") \(error.code)"
             if !codes.contains(code) { codes.append(code) }
         }
         return codes.joined(separator: ", ")
+    }
+
+    /// Whether the model's output couldn't be read back ("Failed to parse generated content"): Private Cloud Compute
+    /// says so without a public case, and only in words.
+    static func unparsable(_ error: Error) -> Bool {
+        ([error as NSError] + underlying(error)).contains { error in
+            error.localizedDescription.localizedCaseInsensitiveContains("failed to parse generated content")
+        } || describe(error).localizedCaseInsensitiveContains("failed to parse generated content")
     }
 
     /// The errors under `error`, outermost first.

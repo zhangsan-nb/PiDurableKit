@@ -275,6 +275,10 @@ struct FoundationModelsTests {
         #expect(FoundationModelsResponder.retry(for: PrivateCloudComputeLanguageModel.Error.serviceUnavailable(.init(debugDescription: "busy"))) != nil)
         #expect(FoundationModelsResponder.retry(for: over) == nil)
         #expect(FoundationModelsResponder.retry(for: unknown) == nil)
+        // Output Private Cloud Compute couldn't read back is retried, by pi-ai's words and within the request.
+        let unparsable = NSError(domain: "FoundationModels.LanguageModelError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to parse generated content."])
+        #expect(FoundationModelsResponder.message(for: unparsable).contains("provider returned an error"))
+        #expect(FoundationModelsResponder.retry(for: unparsable) != nil)
         #expect(FoundationModelsResponder.retry(for: PrivateCloudComputeLanguageModel.Error.quotaLimitReached(.init(resetDate: reset, debugDescription: "limit"))) == nil)
         // A model without vision gets placeholders instead of images.
         let segments = FoundationModelsResponder.segments([.image(ImageContent(data: Data([1, 2]), mimeType: "image/png"))], vision: false)
