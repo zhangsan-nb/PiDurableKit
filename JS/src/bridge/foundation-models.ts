@@ -61,6 +61,9 @@ type Answer = {
 	stopReason: AssistantMessage["stopReason"];
 	usage: { input: number; cachedInput: number; output: number; reasoning: number };
 	errorMessage?: string;
+	/** A transient failure, and when the model asked to be tried again, if it said (`FoundationModelsResponder.retry`). */
+	retryable?: boolean;
+	retryAfterMs?: number;
 };
 
 function toolDefinition(tool: { name: string; description: string; parameters: unknown }) {
@@ -122,7 +125,7 @@ async function run(
 	stream.push({ type: "start", partial: partial() });
 	try {
 		const messages = context.messages;
-		const answer = await hostStream<Answer>(
+		const request = () => hostStream<Answer>(
 			"foundationModels.respond",
 			{
 				models,
@@ -180,6 +183,34 @@ async function run(
 			},
 			signal === undefined ? undefined : { abortSignal: signal },
 		);
+		// A transient failure before anything streamed is tried again within the request, as pi-ai's providers retry an
+		// HTTP failure (`retryProviderRequest`): up to `maxRetries` times (none by default), waiting for the model's
+		// reset date as a `retry-after`, unless that's longer than `maxRetryDelayMs` (60 seconds by default), or else
+		// pi-ai's backoff.
+		const maxRetries = options?.maxRetries ?? 0;
+		const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
+		let answer = await request();
+		for (let attempt = 0; answer.stopReason === "error" && answer.retryable === true && content.length === 0 && attempt < maxRetries; attempt++) {
+			if (signal?.aborted) break;
+			const requested = answer.retryAfterMs;
+			if (requested !== undefined && maxRetryDelayMs > 0 && requested > maxRetryDelayMs) {
+				answer = {
+					...answer,
+					errorMessage: `Server requested ${Math.ceil(requested / 1000)}s retry delay (max: ${Math.ceil(maxRetryDelayMs / 1000)}s). ${answer.errorMessage ?? ""}`,
+				};
+				break;
+			}
+			const delay = requested ?? Math.min(0.5 * 2 ** attempt, 8) * 1000 * (1 - Math.random() * 0.25);
+			await new Promise<void>((resolve) => {
+				const timer = setTimeout(resolve, delay);
+				signal?.addEventListener("abort", () => {
+					clearTimeout(timer);
+					resolve();
+				}, { once: true });
+			});
+			if (signal?.aborted) break;
+			answer = await request();
+		}
 		if (signal?.aborted) throw new Error("Request was aborted");
 		// The final text replaces what streamed, in case the model revised it mid-stream.
 		reconcile("thinking", answer.thinking);

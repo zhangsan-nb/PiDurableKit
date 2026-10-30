@@ -269,7 +269,8 @@ struct FoundationModelsResponder: Sendable {
         } catch {
             // A failed or cancelled request leaves the session in an unknown state; it is not reused.
             if Task.isCancelled || error is CancellationError { throw CancellationError() }
-            return Self.answer(stopReason: "error", usage: usage ?? requestUsage(), error: Self.message(for: error), text: text)
+            return Self.answer(
+                stopReason: "error", usage: usage ?? requestUsage(), error: Self.message(for: error), text: text, retry: Self.retry(for: error))
         }
     }
 
@@ -413,7 +414,7 @@ struct FoundationModelsResponder: Sendable {
 
     static func answer(
         stopReason: String, usage: LanguageModelSession.Usage?, toolCalls: [JSONValue] = [], error: String? = nil,
-        text: String = "", thinking: String = ""
+        text: String = "", thinking: String = "", retry: Retry? = nil
     ) -> JSONValue {
         var answer: JSONObject = [
             "stopReason": .string(stopReason),
@@ -428,7 +429,48 @@ struct FoundationModelsResponder: Sendable {
             ],
         ]
         if let error { answer["errorMessage"] = .string(error) }
+        if let retry {
+            answer["retryable"] = true
+            if let after = retry.after { answer["retryAfterMs"] = .number((after * 1000).rounded(.up)) }
+        }
         return .object(answer)
+    }
+
+    /// A failure worth trying the request again for, and when the model asked to be tried again, if it said.
+    struct Retry {
+        var after: TimeInterval?
+    }
+
+    /// Whether a failure is transient, as pi-ai's providers judge an HTTP failure (a rate limit, a timeout, a busy or
+    /// unreachable service: 408, 429, 5xx, or no response), so the bridge retries it within the request when the
+    /// harness's `stream` settings allow (`maxRetries`, waiting `retryAfterMs` up to `maxRetryDelayMs`), as pi-ai's
+    /// providers do with a `retry-after` header. A rate limit's reset date is its `retry-after`. Quotas, refusals,
+    /// guardrails and an overflow are not retried here.
+    static func retry(for error: Error) -> Retry? {
+        if let error = error as? LanguageModelError {
+            switch error {
+            case .rateLimited(let limited): return Retry(after: limited.resetDate.map { max(0, $0.timeIntervalSinceNow) })
+            case .timeout: return Retry()
+            default: return nil
+            }
+        }
+        if let error = error as? LanguageModelSession.GenerationError {
+            switch error {
+            case .rateLimited, .concurrentRequests: return Retry()
+            default: return nil
+            }
+        }
+        if let error = error as? PrivateCloudComputeLanguageModel.Error {
+            switch error {
+            case .networkFailure, .serviceUnavailable: return Retry()
+            default: return nil
+            }
+        }
+        // Apple's own `GenerativeError` categories: 2 a request the system cancelled, 3 a network failure.
+        if let generative = underlying(error).last(where: { $0.domain == generativeErrorDomain }), [2, 3].contains(generative.code / 1_000_000) {
+            return Retry()
+        }
+        return nil
     }
 
     static func reasoning(in entries: some Sequence<Transcript.Entry>) -> String {

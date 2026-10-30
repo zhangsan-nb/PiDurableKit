@@ -265,6 +265,17 @@ struct FoundationModelsTests {
         let quota = FoundationModelsResponder.message(for: PrivateCloudComputeLanguageModel.Error.quotaLimitReached(.init(
             resetDate: Date(timeIntervalSince1970: 1_800_000_000), debugDescription: "limit")))
         #expect(quota.hasPrefix("Private Cloud Compute quota limit reached until 2027-01-15T08:00:00Z: "))
+        // Transient failures are retried within the request, a rate limit after its reset date; others aren't.
+        let reset = Date.now.addingTimeInterval(5)
+        let retry = FoundationModelsResponder.retry(for: LanguageModelError.rateLimited(.init(resetDate: reset, debugDescription: "slow down")))
+        #expect(retry != nil && (4...5).contains(retry?.after ?? 0))
+        #expect(FoundationModelsResponder.retry(for: LanguageModelError.timeout(.init(debugDescription: "late")))?.after == nil)
+        #expect(FoundationModelsResponder.retry(for: LanguageModelError.timeout(.init(debugDescription: "late"))) != nil)
+        #expect(FoundationModelsResponder.retry(for: cancelled) != nil)
+        #expect(FoundationModelsResponder.retry(for: PrivateCloudComputeLanguageModel.Error.serviceUnavailable(.init(debugDescription: "busy"))) != nil)
+        #expect(FoundationModelsResponder.retry(for: over) == nil)
+        #expect(FoundationModelsResponder.retry(for: unknown) == nil)
+        #expect(FoundationModelsResponder.retry(for: PrivateCloudComputeLanguageModel.Error.quotaLimitReached(.init(resetDate: reset, debugDescription: "limit"))) == nil)
         // A model without vision gets placeholders instead of images.
         let segments = FoundationModelsResponder.segments([.image(ImageContent(data: Data([1, 2]), mimeType: "image/png"))], vision: false)
         guard case .text(let text)? = segments.first else {
