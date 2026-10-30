@@ -195,12 +195,12 @@ struct FoundationModelsResponder: Sendable {
             session.transcriptErrorHandlingPolicy = .preserveTranscript
         }
 
-        // The on-device model counts tokens locally: an overflow is reported before the request, in the same words on
-        // every platform, so pi-durable compacts and retries.
-        if let system = model as? SystemLanguageModel {
+        // Requests are counted before they're sent, so an overflow is reported in the same words on every platform,
+        // and pi-durable compacts and retries without the request going out (`counter`).
+        if let (counter, contextSize) = await Self.counter(for: model) {
             let counted = Array(session.transcript) + [.prompt(Transcript.Prompt(segments: Self.segments(prompt?.content ?? [], vision: vision)))]
-            if let tokens = try? await system.tokenCount(for: counted), tokens > system.contextSize {
-                return Self.answer(stopReason: "error", usage: nil, error: Self.overflow(tokens: tokens, contextSize: system.contextSize))
+            if let tokens = try? await counter.tokenCount(for: counted), tokens > contextSize {
+                return Self.answer(stopReason: "error", usage: nil, error: Self.overflow(tokens: tokens, contextSize: contextSize))
             }
         }
         let start = session.transcript.count
@@ -477,8 +477,8 @@ struct FoundationModelsResponder: Sendable {
         if case .assetsUnavailable? = error as? SystemLanguageModel.Error {
             return "Apple's on-device model assets are unavailable (service unavailable): \(detail)"
         }
-        // Private Cloud Compute turns away a request longer than its window without the public case, and can't count
-        // tokens beforehand: as `GenerativeError` 1020000 ("The max context length was reached with input token count:
+        // Private Cloud Compute turns away a request longer than its window without the public case (when the
+        // on-device model isn't there to count it first, `counter`): as `GenerativeError` 1020000 ("The max context length was reached with input token count:
         // 32837, context length: 32768", its service logs; iOS 27). An overflow, so pi-durable compacts and retries
         // rather than ending the reply. (In the iOS Simulator, every failure on the Mac's side arrives as
         // `ModelManagerError` 1001, an overflow and a rate limit alike, so that one can't be told apart.)
@@ -500,6 +500,22 @@ struct FoundationModelsResponder: Sendable {
     }
 
     static let generativeErrorDomain = "com.apple.GenerativeFunctionsFoundation.GenerativeError"
+
+    /// What counts a model's requests, and its window: the on-device model counts its own. Private Cloud Compute can't
+    /// count tokens itself, but its tokenizer is the on-device model's: for the same request, the on-device count is
+    /// Private Cloud Compute's to within four tokens (English, Spanish, web pages, JSON and code, whose characters a token
+    /// run from 2 to 4.7, so no estimate in characters comes close), so the on-device model counts its requests too,
+    /// where it's ready. (Without that, a request too long went out, and its overflow came back only as Private Cloud
+    /// Compute's own error after the round trip.)
+    static func counter(for model: any LanguageModel) async -> (SystemLanguageModel, Int)? {
+        if let system = model as? SystemLanguageModel { return (system, system.contextSize) }
+        if let cloud = model as? PrivateCloudComputeLanguageModel, SystemLanguageModel.default.isAvailable,
+            let contextSize = try? await cloud.contextSize, contextSize > 0
+        {
+            return (SystemLanguageModel.default, contextSize)
+        }
+        return nil
+    }
 
     /// An error in a few words: its own description when it has one, otherwise its domain and code and those of the
     /// errors under it ("LanguageModelError -1, GenerativeError 2010000").
